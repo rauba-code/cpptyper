@@ -39,17 +39,22 @@ const term = {
 type Term = keyof (typeof term);
 
 const nonTerm = {
-    "TemplateType": null,
-    "TemplateTypeOrEnd": null,
-    "FunctionParam": null,
+    "TemplateParamPlus": null,
+    "TemplateParamOrEnd": null,
+    "FunctionParamPlus": null,
     "FunctionParamOrEnd": null,
     "Member": null,
     "Function": null,
     "Type": null,
     "Object": null,
+    "ParamObject": null,
+    "Parametric": null,
     "LRef": null,
+    "LValue": null,
     "Pointer": null,
+    "Pointee": null,
     "Array": null,
+    "ArraySize": null,
     "Class": null,
     "Arithmetic": null,
     "Literal": null,
@@ -68,25 +73,30 @@ type LexSym = Term | NonTerm | SpecTerm;
 
 const typeBNF: { [symbol: string]: LexSym[][] } = {
     "Type": [["Object", "VOID", "Function", "LRef"]],
-    "Object": [["Class", "Array", "Arithmetic", "NULLPTR", "Pointer", "Member"]],
+    "Object": [["ParamObject", "Array"]],
+    "ParamObject": [["Class", "Arithmetic", "NULLPTR", "Pointer", "Member"]],
+    "Parametric": [["ParamObject", "LRef"]],
     "Member": [["MEMBER"], ["Class"], ["Class"]],
-    "LRef": [["LREF"], ["Object", "Function"]],
-    "Pointer": [["PTR"], ["Object", "Function"]],
-    "Array": [["ARRAY"], ["Object"], ["positiveint"]],
-    "TemplateTypeOrEnd": [["TemplateType", "END"]],
-    "TemplateType": [["Object", "Function"], ["TemplateTypeOrEnd"]],
-    "Class": [["CLASS"], ["identifier"], ["TemplateTypeOrEnd"]],
+    "LRef": [["LREF"], ["LValue"]],
+    "LValue": [["Object", "Function"]],
+    "Pointee": [["LValue", "VOID"]],
+    "Pointer": [["PTR"], ["Pointee"]],
+    "Array": [["ARRAY"], ["Object"], ["ArraySize"]],
+    "ArraySize": [["positiveint"]],
+    "Class": [["CLASS"], ["identifier"], ["TemplateParamOrEnd"]],
     "Arithmetic": [["I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "BOOL"]],
     "Function": [["FUNCTION"], ["Return"], ["FunctionParamOrEnd"]],
-    "FunctionParamOrEnd": [["FunctionParam", "END"]],
-    "FunctionParam": [["Object", "LRef"], ["FunctionParamOrEnd"]],
-    "Return": [["Class", "NULLPTR", "Pointer", "Member", "VOID"]]
+    "FunctionParamOrEnd": [["FunctionParamPlus", "END"]],
+    "FunctionParamPlus": [["Parametric"], ["FunctionParamOrEnd"]],
+    "TemplateParamOrEnd": [["TemplateParamPlus", "END"]],
+    "TemplateParamPlus": [["Parametric"], ["TemplateParamOrEnd"]],
+    "Return": [["Parametric", "VOID"]]
 };
 
 type Parser = { [symbol: string]: { [startsWith: string]: NonTerm | SpecTerm | null }[] }
 
 console.time("create_parser")
-function constructTypeGrammarTree(): Parser {
+function constructTypeParser(): Parser {
     let result: Parser = {};
     Object.keys(typeBNF).forEach((key: string) => {
         result[key] = new Array();
@@ -131,7 +141,7 @@ function constructTypeGrammarTree(): Parser {
 
     return result;
 }
-const typeParser = constructTypeGrammarTree();
+const typeParser = constructTypeParser();
 console.timeEnd("create_parser");
 console.log(typeParser);
 
@@ -139,6 +149,38 @@ interface ParsedLemma {
     ok: boolean,
     result: string[],
     sentence: string[]
+}
+
+const wildcardDeclarator: string = '!';
+const wildcardSpecifier: string = '?';
+
+function preparse(sentence: string[], strict_order: boolean = true): string[] {
+    let targets: string[] = new Array();
+    while (sentence.length > 0 && sentence[0].startsWith(wildcardDeclarator)) {
+        targets.push(sentence[0].slice(1));
+        sentence = sentence.slice(1);
+    }
+    if (targets.length === 0) {
+        return sentence;
+    }
+    let expectedMaxId: number = 0;
+    return sentence.map((x: string) => {
+        if (x.startsWith(wildcardSpecifier)) {
+            const wildcardId : number = parseInt(x.slice(1));
+            if (!(wildcardId >= 0 && wildcardId < targets.length)) {
+                throw new Error(`Wildcard ${x} is out of bounds`);
+            }
+            if (strict_order && expectedMaxId < wildcardId) {
+                throw new Error(`Wildcard ${x} precedes ?${expectedMaxId}`);
+            }
+            if (wildcardId === expectedMaxId) {
+                expectedMaxId++;
+            }
+            return targets[wildcardId];
+        } else {
+            return x;
+        }
+    });
 }
 
 function parse(parser: Parser, scope: NonTerm, sentence: string[]): ParsedLemma {
@@ -177,7 +219,7 @@ function parse(parser: Parser, scope: NonTerm, sentence: string[]): ParsedLemma 
                 sentence = sentence.slice(1);
             }
         } else {
-            result.push("{Expected" + scope + "}");
+            result.push("{Expected " + scope + "}");
             ok = false;
             sentence = [];
         }
@@ -190,13 +232,16 @@ function execCommand(command: string[]): void {
     const commands: { [key: string]: (params: string[]) => void } = {
         "PARSE": (params: string[]) => {
             console.time("command");
-            const parseResult = parse(typeParser, "Type", params);
+            const parseResult = parse(typeParser, "Type", preparse(params));
             console.timeEnd("command");
             console.log("ok: " + parseResult.ok);
             console.log(parseResult.result.join(" "));
         },
         "ECHO": (params: string[]) => {
             console.log(params);
+        },
+        "EXIT": (_: string[]) => {
+            process.exit(0);
         }
     }
     if (command.length == 0) {
