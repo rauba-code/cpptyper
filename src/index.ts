@@ -306,15 +306,28 @@ function parseSubset(parser: Parser, scope: NonTerm, pair: SigPair): boolean {
                     retv = false;
                     return;
                 }
-                // throw new TypeParseError("Unimplemented");
             }
+        } else if (pair.supertype.length > 0 && "identifier" in argument) {
+            if (!(pair.subtype.length > 0 && pair.subtype[0] === pair.supertype[0])) {
+                retv = false;
+                return;
+            }
+            pair.supertype = pair.supertype.slice(1);
+            pair.subtype = pair.subtype.slice(1);
+        } else if (pair.supertype.length > 0 && "positiveint" in argument) {
+            if (!(pair.subtype.length > 0 && pair.subtype[0] === pair.supertype[0] && parseInt(pair.subtype[0]) > 0)) {
+                retv = false;
+                return;
+            }
+            pair.supertype = pair.supertype.slice(1);
+            pair.subtype = pair.subtype.slice(1);
+            throw new TypeParseError("Positiveint management is unimplemented");
         } else {
-            throw new TypeParseError("Unimplemented");
+            retv = false;
         }
     });
     if (retv === null) {
         return true;
-        //throw new Error("parseSubset returned null")
     }
     return retv;
     //throw new TypeParseError("Unimplemented");
