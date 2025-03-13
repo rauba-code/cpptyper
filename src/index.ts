@@ -21,7 +21,6 @@ class TypeParseError extends Error {
 }
 
 const term = {
-    "TTYPE": null,
     "FUNCTION": null,
     "VOID": null,
     "NULLPTR": null,
@@ -41,11 +40,14 @@ const term = {
     "F32": null,
     "F64": null,
     "BOOL": null,
-    "STRINGLITERAL": null,
-    "CHARLITERAL": null,
-    "INTLITERAL": null,
-    "FLOATLITERAL": null,
-    "END": null
+    "STRINGLITERAL": null, // unused
+    "CHARLITERAL": null, // unused
+    "INTLITERAL": null, // unused
+    "FLOATLITERAL": null, // unused
+    "<": null,
+    ">": null,
+    "(": null,
+    ")": null
 } as const;
 type Term = keyof (typeof term);
 
@@ -68,7 +70,7 @@ const nonTerm = {
     "ArraySize": null,
     "Class": null,
     "Arithmetic": null,
-    "Literal": null,
+    "Literal": null, // unused
     "ObjectOrFunction": null,
     "Return": null
 } as const;
@@ -94,12 +96,12 @@ const typeBNF: { [symbol: string]: LexSym[][] } = {
     "Pointer": [["PTR"], ["Pointee"]],
     "Array": [["ARRAY"], ["Object"], ["ArraySize"]],
     "ArraySize": [["positiveint"]],
-    "Class": [["CLASS"], ["identifier"], ["TemplateParamOrEnd"]],
+    "Class": [["CLASS"], ["identifier"], ["<"], ["TemplateParamOrEnd"]],
     "Arithmetic": [["I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "BOOL"]],
-    "Function": [["FUNCTION"], ["Return"], ["FunctionParamOrEnd"]],
-    "FunctionParamOrEnd": [["FunctionParamPlus", "END"]],
+    "Function": [["FUNCTION"], ["Return"], ["("], ["FunctionParamOrEnd"]],
+    "FunctionParamOrEnd": [["FunctionParamPlus", ")"]],
     "FunctionParamPlus": [["Parametric"], ["FunctionParamOrEnd"]],
-    "TemplateParamOrEnd": [["TemplateParamPlus", "END"]],
+    "TemplateParamOrEnd": [["TemplateParamPlus", ">"]],
     "TemplateParamPlus": [["Parametric"], ["TemplateParamOrEnd"]],
     "Return": [["Parametric", "VOID"]]
 };
@@ -165,33 +167,44 @@ interface ParsedLemma {
 const wildcardDeclarator: string = '!';
 const wildcardSpecifier: string = '?';
 
-function preparse(sentence: string[], strict_order: boolean = true): string[] {
+function preparse(sentence: string[], strict_order: boolean = true): { sentence: string[], wildcardMap: number[] } {
     let targets: string[] = new Array();
     while (sentence.length > 0 && sentence[0].startsWith(wildcardDeclarator)) {
         targets.push(sentence[0].slice(1));
         sentence = sentence.slice(1);
     }
+    let wildcardMap: number[] = [];
     if (targets.length === 0) {
-        return sentence;
+        return { sentence, wildcardMap };
     }
     let expectedMaxId: number = 0;
-    return sentence.map((x: string) => {
-        if (x.startsWith(wildcardSpecifier)) {
-            const wildcardId: number = parseInt(x.slice(1));
-            if (!(wildcardId >= 0 && wildcardId < targets.length)) {
-                throw new TypeParseError(`Wildcard ${x} is out of bounds`);
+    let anonWildcardId: number = targets.length;
+    return {
+        sentence: sentence.map((x: string) => {
+            if (x.startsWith(wildcardSpecifier)) {
+                const wildcardId: number = parseInt(x.slice(1));
+                if (!(wildcardId >= 0 && wildcardId < targets.length)) {
+                    throw new TypeParseError(`Wildcard ${x} is out of bounds`);
+                }
+                if (strict_order && expectedMaxId < wildcardId) {
+                    throw new TypeParseError(`Wildcard ${x} precedes ?${expectedMaxId}`);
+                }
+                if (wildcardId === expectedMaxId) {
+                    expectedMaxId++;
+                }
+                wildcardMap.push(wildcardId);
+                return targets[wildcardId];
+            } else if (x.startsWith(wildcardDeclarator)) {
+                throw new TypeParseError('Wildcard declarator detected after the start of the sentence')
+            } else {
+                if (x in nonTerm) {
+                    wildcardMap.push(anonWildcardId++);
+                }
+                return x;
             }
-            if (strict_order && expectedMaxId < wildcardId) {
-                throw new TypeParseError(`Wildcard ${x} precedes ?${expectedMaxId}`);
-            }
-            if (wildcardId === expectedMaxId) {
-                expectedMaxId++;
-            }
-            return targets[wildcardId];
-        } else {
-            return x;
-        }
-    });
+        }),
+        wildcardMap
+    };
 }
 
 function parse(parser: Parser, scope: NonTerm, sentence: string[]): string[] | null {
@@ -273,11 +286,26 @@ function parsePretty(parser: Parser, scope: NonTerm, sentence: string[]): Parsed
 
 interface SigPair {
     subtype: string[],
+    subwc: number[],
     supertype: string[]
+    superwc: number[],
+    wildcards: (number | string[])[],
+}
+
+function arrayValuesEqual(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) {
+        return false;
+    }
+    for (let i: number = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 function parseSubset(parser: Parser, scope: NonTerm, pair: SigPair): boolean {
-    let retv : boolean | null = null;
+    let retv: boolean | null = null;
     parser[scope].forEach((argument) => {
         if (retv !== null) {
             return;
@@ -286,12 +314,41 @@ function parseSubset(parser: Parser, scope: NonTerm, pair: SigPair): boolean {
             const innerScope: NonTerm | null = argument[pair.supertype[0]] as NonTerm | null;
             if (innerScope === null) {
                 if (pair.supertype[0] === scope) {
+                    // wildcard management
                     pair.supertype = pair.supertype.slice(1);
+                    const subtype0 = pair.subtype;
                     let r = parse(parser, scope, pair.subtype);
                     if (r !== null) {
-                        pair.subtype = r;
+                        const wcInstance = subtype0.slice(0, subtype0.length - r.length);
+                        let subresult: number | string[];
+                        if (wcInstance.length === 1 && wcInstance[0] in nonTerm) {
+                            // subset is also a wildcard
+                            subresult = pair.subwc[0];
+                            pair.subwc = pair.subwc.slice(1);
+                        } else {
+                            subresult = wcInstance;
+                        }
+                        const superwc: number | string[] = pair.wildcards[pair.superwc[0]];
+                        if (superwc === undefined) {
+                            pair.wildcards[pair.superwc[0]] = subresult;
+                        } else if (typeof superwc === "number") {
+                            if (superwc !== subresult) {
+                                retv = false;
+                            }
+                        } else {
+                            // superwc is an array
+                            if (typeof subresult === "number" || !arrayValuesEqual(superwc, subresult)) {
+                                retv = false;
+                            }
+                        }
                     }
-                    retv = r !== null;
+                    if (retv === null) {
+                        retv = r !== null;
+                    }
+                    if (retv === true && r !== null) {
+                        pair.subtype = r;
+                        pair.superwc = pair.superwc.slice(1);
+                    }
                     return;
                 } else {
                     if (!(pair.subtype.length > 0 && pair.subtype[0] === pair.supertype[0])) {
@@ -315,13 +372,12 @@ function parseSubset(parser: Parser, scope: NonTerm, pair: SigPair): boolean {
             pair.supertype = pair.supertype.slice(1);
             pair.subtype = pair.subtype.slice(1);
         } else if (pair.supertype.length > 0 && "positiveint" in argument) {
-            if (!(pair.subtype.length > 0 && pair.subtype[0] === pair.supertype[0] && parseInt(pair.subtype[0]) > 0)) {
+            if (!(pair.subtype.length > 0 && pair.subtype[0] === pair.supertype[0] && parseInt(pair.subtype[0]) >= 0)) {
                 retv = false;
                 return;
             }
             pair.supertype = pair.supertype.slice(1);
             pair.subtype = pair.subtype.slice(1);
-            throw new TypeParseError("Positiveint management is unimplemented");
         } else {
             retv = false;
         }
@@ -330,55 +386,22 @@ function parseSubset(parser: Parser, scope: NonTerm, pair: SigPair): boolean {
         return true;
     }
     return retv;
-    //throw new TypeParseError("Unimplemented");
-    /*parser[scope].forEach((argument) => {
-        if (!ok || endLoop) {
-            return;
-        }
-        if (sentence.length > 0 && sentence[0] in argument) {
-            const innerScope: NonTerm | null = argument[sentence[0]] as NonTerm | null;
-            if (innerScope === null) {
-                if (sentence[0] === scope) {
-                    endLoop = true;
-                } else {
-                    result.push(sentence[0]);
-                }
-                sentence = sentence.slice(1);
-            } else {
-                const parseResult = parse(parser, innerScope as NonTerm, sentence);
-                result = result.concat(parseResult.result);
-                sentence = parseResult.sentence;
-                ok = parseResult.ok;
-            }
-        } else if (sentence.length > 0 && "identifier" in argument) {
-            result.push(sentence[0]);
-            sentence = sentence.slice(1);
-        } else if (sentence.length > 0 && "positiveint" in argument) {
-            if (!(parseInt(sentence[0]) > 0)) {
-                result.push("{Expected positive integer}");
-                ok = false;
-                sentence = [];
-            } else {
-                result.push(sentence[0]);
-                sentence = sentence.slice(1);
-            }
-        } else {
-            result.push("{Expected " + scope + "}");
-            ok = false;
-            sentence = [];
-        }
-    });
-    result.push(")");
-    return { ok, result, sentence };*/
 }
 
+let expected: string | null = null;
+let tests_total: number = 0;
+let tests_passed: number = 0;
+
 function execCommand(command: string[]): void {
-    const commands: { [key: string]: (params: string[]) => void } = {
+    let nextExpected: string | null = null;
+    const commands: { [key: string]: (params: string[]) => string } = {
         "PARSE": (params: string[]) => {
             console.time("command");
             try {
-                const parseResult = parsePretty(typeParser, "Type", preparse(params));
+                const preparseResult = preparse(params);
+                const parseResult = parsePretty(typeParser, "Type", preparseResult.sentence);
                 console.log("ok: " + parseResult.ok);
+                console.log("wildcardMap: " + preparseResult.wildcardMap);
                 console.log(parseResult.result.join(" "));
             } catch (e) {
                 if (!(e instanceof TypeParseError)) {
@@ -388,27 +411,40 @@ function execCommand(command: string[]): void {
             } finally {
                 console.timeEnd("command");
             }
+            return "";
         },
         "ECHO": (params: string[]) => {
             console.log(params);
+            return params.join(' ');
         },
         "EXIT": (_: string[]) => {
             process.exit(0);
         },
+        "ASSERT": (params: string[]) => {
+            nextExpected = params.join(' ');
+            return "";
+        },
         "SUBTYPE": (params: string[]) => {
+            let result: string = "";
             console.time("command");
             try {
                 const keywordIdx: number = params.indexOf("IN");
                 if (keywordIdx === -1) {
                     console.log("Usage: SUBTYPE <subtype> IN <supertype>")
                 } else {
+                    let subData = preparse(params.slice(0, keywordIdx));
+                    let superData = preparse(params.slice(keywordIdx + 1));
                     const pair: SigPair = {
-                        subtype: preparse(params.slice(0, keywordIdx)),
-                        supertype: preparse(params.slice(keywordIdx + 1)),
+                        subtype: subData.sentence,
+                        subwc: subData.wildcardMap,
+                        supertype: superData.sentence,
+                        superwc: superData.wildcardMap,
+                        wildcards: new Array<number | string[]>()
                     }
                     const p1: boolean = parseSubset(typeParser, "Type", pair);
                     const p2: boolean = pair.subtype.length === 0 && pair.supertype.length === 0;
                     console.log(p1 && p2);
+                    result = (p1 && p2) ? "TRUE" : "FALSE";
                     if (!p2) {
                         console.log("Trailing data detected:")
                         console.log("  subtype: " + pair.subtype);
@@ -423,15 +459,24 @@ function execCommand(command: string[]): void {
             } finally {
                 console.timeEnd("command");
             }
+            return result;
         }
-    }
-    if (command.length == 0) {
-        return;
     }
     const cmdName: string = command[0];
     const params: string[] = command.slice(1);
     if (cmdName in commands) {
-        commands[cmdName](params);
+        const received = commands[cmdName](params);
+        if (expected !== null) {
+            console.log(`Assertion for ${JSON.stringify(params.join(" "))} is ${expected === received ? "passed" : "failed"}`);
+            if (expected !== received) {
+                console.log(`  expected: ${expected}`);
+                console.log(`  received: ${received}`);
+            } else {
+                tests_passed++;
+            }
+            tests_total++;
+        }
+        expected = nextExpected;
     } else {
         console.log("Available commands: ")
         console.log("  " + Object.keys(commands).join(", "))
@@ -442,6 +487,19 @@ process.stdin.on('readable', () => {
     let chunk: Buffer;
     while (null !== (chunk = process.stdin.read())) {
         const chunkStr: string = chunk.toString("utf8").trim();
-        execCommand(chunkStr.split(' '));
+        chunkStr.split('\n').forEach((line) => {
+            if (line === "") {
+                return;
+            }
+            execCommand(line.split(' '));
+        })
+    }
+})
+
+process.on('beforeExit', () => {
+    if (tests_total > 0) {
+        console.log(`Total tests: ${tests_total}`)
+        console.log(` Passed: ${tests_passed}`)
+        console.log(` Failed: ${tests_total - tests_passed}`)
     }
 })
